@@ -353,6 +353,15 @@ pub fn unbind_raw_event_handler(handler: &RawEventHandler) -> Result<(), NwgErro
     }
 }
 
+/// Enables dark mode support for a top-level window.
+/// This function only affects the titlebar's color.
+///
+/// # Arguments
+///
+/// * `hwnd`: The handle to a top-level window which should support dark mode.
+///
+/// returns: Result<(), String>
+///
 unsafe fn enable_dark_mode_for_window(hwnd: HWND) -> Result<(), String> {
     let value: BOOL = TRUE;
     let result: HRESULT = winapi::um::dwmapi::DwmSetWindowAttribute(
@@ -734,7 +743,9 @@ unsafe extern "system" fn process_events(hwnd: HWND, msg: UINT, w: WPARAM, l: LP
         NWG_TIMER_STOP => callback(Event::OnTimerStop, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
         NWG_TIMER_TICK => callback(Event::OnTimerTick, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
         NWG_INIT => {
-            enable_dark_mode_for_window(hwnd).expect("Failed to enable dark mode for window");
+            if enable_dark_mode_for_window(hwnd).is_err() {
+                println!("enable_dark_mode_for_window failed, is the Windows version too old?");
+            }
             callback(Event::OnInit, NO_DATA, base_handle)
         },
         WM_CLOSE => {
