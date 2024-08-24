@@ -3,11 +3,11 @@ Native Windows GUI windowing base. Includes events dispatching and window creati
 
 Warning. Not for the faint of heart.
 */
-use winapi::shared::minwindef::{BOOL, UINT, DWORD, HMODULE, WPARAM, LPARAM, LRESULT};
+use winapi::shared::minwindef::{BOOL, UINT, DWORD, HMODULE, WPARAM, LPARAM, LRESULT, TRUE, LPVOID};
 use winapi::shared::windef::{HWND, HMENU, HBRUSH};
 use winapi::shared::basetsd::{DWORD_PTR, UINT_PTR};
-use winapi::um::winuser::{WNDPROC, NMHDR, IDCANCEL, IDOK};
-use winapi::um::commctrl::{NMTTDISPINFOW, SUBCLASSPROC};
+use winapi::um::winuser::{WNDPROC, NMHDR, IDCANCEL, IDOK, MAKEINTRESOURCEA, SetPropW};
+use winapi::um::commctrl::{InitCommonControls, NMTTDISPINFOW, SUBCLASSPROC};
 use super::base_helper::{CUSTOM_ID_BEGIN, to_utf16};
 use super::window_helper::{NOTICE_MESSAGE, NWG_INIT, NWG_TRAY, NWG_TIMER_TICK, NWG_TIMER_STOP};
 use super::high_dpi;
@@ -15,7 +15,7 @@ use crate::controls::ControlHandle;
 use crate::{Event, EventData, NwgError};
 use std::{ptr, mem};
 use std::rc::Rc;
-use std::ffi::OsString;
+use std::ffi::{c_void, OsString};
 use std::os::windows::prelude::OsStringExt;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -351,6 +351,22 @@ pub fn unbind_raw_event_handler(handler: &RawEventHandler) -> Result<(), NwgErro
 
         Ok(())
     }
+}
+
+unsafe fn enable_dark_mode_for_window(hwnd: HWND) -> Result<(), String> {
+    let value: BOOL = TRUE;
+    let result: HRESULT = winapi::um::dwmapi::DwmSetWindowAttribute(
+        hwnd,
+        20,
+        &value as *const BOOL as *const _,
+        size_of::<BOOL>() as _,
+    );
+
+    if result != 0 {
+        return Err("DwmSetWindowAttribute failed".to_string());
+    }
+
+    return Ok(());
 }
 
 /**
@@ -717,7 +733,10 @@ unsafe extern "system" fn process_events(hwnd: HWND, msg: UINT, w: WPARAM, l: LP
         NOTICE_MESSAGE => callback(Event::OnNotice, NO_DATA, ControlHandle::Notice(hwnd, w as u32)),
         NWG_TIMER_STOP => callback(Event::OnTimerStop, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
         NWG_TIMER_TICK => callback(Event::OnTimerTick, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
-        NWG_INIT => callback(Event::OnInit, NO_DATA, base_handle),
+        NWG_INIT => {
+            enable_dark_mode_for_window(hwnd).expect("Failed to enable dark mode for window");
+            callback(Event::OnInit, NO_DATA, base_handle)
+        },
         WM_CLOSE => {
             let mut should_exit = true;
             let data = EventData::OnWindowClose(WindowCloseData { data: &mut should_exit as *mut bool });
@@ -1059,6 +1078,9 @@ unsafe fn is_textbox_control(hwnd: HWND) -> bool {
 //
 
 #[cfg(target_env="gnu")] use std::{sync::Mutex, collections::HashMap};
+use winapi::shared::winerror::HRESULT;
+use winapi::um::libloaderapi::LOAD_LIBRARY_SEARCH_SYSTEM32;
+use winapi::um::winnt::{CHAR, HANDLE, VOID};
 
 #[cfg(target_env="gnu")]
 type SubclassId = (usize, usize, UINT_PTR);
