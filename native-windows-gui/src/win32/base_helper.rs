@@ -2,7 +2,9 @@ use std::ptr;
 use winapi::shared::windef::HWND;
 use winapi::shared::minwindef::DWORD;
 use crate::ControlHandle;
-use std::ffi::OsString;
+use std::ffi::{CStr, OsString};
+use std::os::windows::ffi::OsStringExt;
+use winapi::ctypes::c_char;
 
 pub const CUSTOM_ID_BEGIN: u32 = 10000;
 
@@ -111,4 +113,29 @@ pub unsafe fn get_system_error() -> (DWORD, String) {
         .unwrap_or("Error while decoding system error message".to_string());
 
     (code, error_message)
+}
+
+/// Converts a wide C string pointer to a string.
+///
+/// # Arguments
+///
+/// * `ptr`: Pointer to a null-terminated Rust string.
+///
+/// returns: String
+pub fn cwstr_to_str(ptr: isize) -> String {
+    if ptr == 0 {
+        return "".to_string()
+    }
+
+    let wide_ptr = ptr as *const u16;
+
+    let mut len = 0;
+    while unsafe { *wide_ptr.add(len) } != 0 {
+        len += 1;
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts(wide_ptr, len) };
+
+    let os_string = OsString::from_wide(slice);
+    os_string.to_string_lossy().into_owned()
 }

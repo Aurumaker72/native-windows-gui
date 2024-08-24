@@ -6,16 +6,16 @@ Warning. Not for the faint of heart.
 use winapi::shared::minwindef::{BOOL, UINT, DWORD, HMODULE, WPARAM, LPARAM, LRESULT, TRUE, LPVOID};
 use winapi::shared::windef::{HWND, HMENU, HBRUSH};
 use winapi::shared::basetsd::{DWORD_PTR, UINT_PTR};
-use winapi::um::winuser::{WNDPROC, NMHDR, IDCANCEL, IDOK, MAKEINTRESOURCEA, SetPropW};
+use winapi::um::winuser::{WNDPROC, NMHDR, IDCANCEL, IDOK, MAKEINTRESOURCEA, SetPropW, SystemParametersInfoW, SPI_GETHIGHCONTRAST, HIGHCONTRASTW, HCF_HIGHCONTRASTON, WM_THEMECHANGED, WM_SETTINGCHANGE};
 use winapi::um::commctrl::{InitCommonControls, NMTTDISPINFOW, SUBCLASSPROC};
-use super::base_helper::{CUSTOM_ID_BEGIN, to_utf16};
-use super::window_helper::{NOTICE_MESSAGE, NWG_INIT, NWG_TRAY, NWG_TIMER_TICK, NWG_TIMER_STOP};
+use super::base_helper::{CUSTOM_ID_BEGIN, cwstr_to_str, to_utf16};
+use super::window_helper::{NOTICE_MESSAGE, NWG_INIT, NWG_TRAY, NWG_TIMER_TICK, NWG_TIMER_STOP, send_message};
 use super::high_dpi;
 use crate::controls::ControlHandle;
 use crate::{Event, EventData, NwgError};
 use std::{ptr, mem};
 use std::rc::Rc;
-use std::ffi::{c_void, OsString};
+use std::ffi::{c_char, c_void, CStr, CString, OsString};
 use std::os::windows::prelude::OsStringExt;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -353,17 +353,44 @@ pub fn unbind_raw_event_handler(handler: &RawEventHandler) -> Result<(), NwgErro
     }
 }
 
-/// Enables dark mode support for a top-level window.
+
+unsafe fn is_dark_mode_active() -> bool {
+    type FnIsDarkModeAllowedForWindow = extern "stdcall" fn(hwnd: HWND) -> bool;
+    type FnShouldAppsUseDarkMode = extern "stdcall" fn() -> bool;
+    type FnIsHighContrast = extern "stdcall" fn() -> bool;
+
+    let h_uxtheme = LoadLibraryExW(to_utf16("uxtheme.dll").as_ptr(), 0 as HANDLE, LOAD_LIBRARY_SEARCH_SYSTEM32);
+
+    if h_uxtheme.is_null() {
+        println!("Failed to load uxtheme.dll");
+        return false;
+    }
+
+    let should_apps_use_dark_mode: FnShouldAppsUseDarkMode = mem::transmute(GetProcAddress(h_uxtheme, MAKEINTRESOURCEA(132)));
+
+    let mut is_high_contrast = false;
+    let mut high_contrast = HIGHCONTRASTW::default();
+    high_contrast.cbSize = size_of::<HIGHCONTRASTW>() as UINT;
+
+    if SystemParametersInfoW(SPI_GETHIGHCONTRAST, high_contrast.cbSize, &mut high_contrast as *mut _ as *mut winapi::ctypes::c_void, 0) != 0 {
+        is_high_contrast = (high_contrast.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    }
+
+    let result = should_apps_use_dark_mode() && !is_high_contrast;
+    FreeLibrary(h_uxtheme);
+    result
+}
+
+/// Updates dark mode status for a top-level window.
 /// This function only affects the titlebar's color.
 ///
 /// # Arguments
 ///
-/// * `hwnd`: The handle to a top-level window which should support dark mode.
+/// * `hwnd`: Handle to a top-level window.
 ///
 /// returns: Result<(), String>
-///
-unsafe fn enable_dark_mode_for_window(hwnd: HWND) -> Result<(), String> {
-    let value: BOOL = TRUE;
+unsafe fn update_dark_mode_for_window(hwnd: HWND) -> Result<(), String> {
+    let value: BOOL = is_dark_mode_active() as BOOL;
     let result: HRESULT = winapi::um::dwmapi::DwmSetWindowAttribute(
         hwnd,
         20,
@@ -739,11 +766,22 @@ unsafe extern "system" fn process_events(hwnd: HWND, msg: UINT, w: WPARAM, l: LP
         WM_LBUTTONDOWN => callback(Event::OnMousePress(MousePressEvent::MousePressLeftDown), NO_DATA, base_handle), 
         WM_RBUTTONUP => callback(Event::OnMousePress(MousePressEvent::MousePressRightUp), NO_DATA, base_handle), 
         WM_RBUTTONDOWN => callback(Event::OnMousePress(MousePressEvent::MousePressRightDown), NO_DATA, base_handle),
+        WM_SETTINGCHANGE => {
+            let str = cwstr_to_str(l);
+            match str.as_str() {
+                "ImmersiveColorSet" => {
+                    if update_dark_mode_for_window(hwnd).is_err() {
+                        println!("enable_dark_mode_for_window failed, is the Windows version too old?");
+                    }
+                },
+                _ => {}
+            }
+        },
         NOTICE_MESSAGE => callback(Event::OnNotice, NO_DATA, ControlHandle::Notice(hwnd, w as u32)),
         NWG_TIMER_STOP => callback(Event::OnTimerStop, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
         NWG_TIMER_TICK => callback(Event::OnTimerTick, NO_DATA, ControlHandle::Timer(hwnd, w as u32)),
         NWG_INIT => {
-            if enable_dark_mode_for_window(hwnd).is_err() {
+            if update_dark_mode_for_window(hwnd).is_err() {
                 println!("enable_dark_mode_for_window failed, is the Windows version too old?");
             }
             callback(Event::OnInit, NO_DATA, base_handle)
@@ -1089,9 +1127,11 @@ unsafe fn is_textbox_control(hwnd: HWND) -> bool {
 //
 
 #[cfg(target_env="gnu")] use std::{sync::Mutex, collections::HashMap};
+use std::ptr::null;
+use winapi::ctypes::wchar_t;
 use winapi::shared::winerror::HRESULT;
-use winapi::um::libloaderapi::LOAD_LIBRARY_SEARCH_SYSTEM32;
-use winapi::um::winnt::{CHAR, HANDLE, VOID};
+use winapi::um::libloaderapi::{FreeLibrary, GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW};
+use winapi::um::winnt::{CHAR, HANDLE, LPWSTR, VOID};
 
 #[cfg(target_env="gnu")]
 type SubclassId = (usize, usize, UINT_PTR);
